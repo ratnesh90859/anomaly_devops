@@ -260,10 +260,13 @@ app.post('/inject/memory-leak', (req, res) => {
   if (injection.memoryLeak.enabled) {
     if (!memoryLeakInterval) {
       memoryLeakInterval = setInterval(() => {
-        // Allocate ~MBs of data
+        // Bypass V8 string intern optimizations by allocating floats
         const mb = injection.memoryLeak.mb_per_second;
-        // String 'A' repeated creates a large string taking up heap memory
-        leakedData.push('A'.repeat(mb * 1024 * 1024));
+        const arr = new Array(Math.floor((mb * 1024 * 1024) / 8));
+        for(let i=0; i < arr.length; i++) {
+          arr[i] = Math.random();
+        }
+        leakedData.push(arr);
       }, 1000);
     }
   } else {
