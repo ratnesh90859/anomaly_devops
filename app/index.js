@@ -117,6 +117,30 @@ app.get('/metrics', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Routes — Health
 // ─────────────────────────────────────────────────────────────────────────────
+// Root — status overview page
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Business-Aware Anomaly Detection System',
+    status: 'running',
+    uptime_seconds: Math.round(process.uptime()),
+    endpoints: {
+      metrics:               'GET  /metrics',
+      health:                'GET  /health',
+      anomalies:             'GET  /anomalies',
+      injection_status:      'GET  /inject/status',
+      inject_payment_fail:   'POST /inject/payment-failure  body: { "enabled": true|false }',
+      inject_latency:        'POST /inject/latency          body: { "enabled": true|false, "delay_ms": 3000 }',
+      inject_slow_reviews:   'POST /inject/slow-reviews     body: { "enabled": true|false }',
+      inject_sub_traffic:    'POST /inject/sub-traffic      body: { "enabled": true|false }',
+    },
+    dashboards: {
+      prometheus: 'http://<VM_IP>:9090',
+      grafana:    'http://<VM_IP>:4000  (admin / admin)',
+    },
+    active_injections: injection,
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
