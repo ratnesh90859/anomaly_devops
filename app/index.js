@@ -9,6 +9,25 @@ const app = express();
 app.use(express.json());
 
 // ─────────────────────────────────────────────────────────────────────────────
+// System Log Interceptor
+// Captures the last 100 log/error lines to pass as raw context to Gemini AI
+// ─────────────────────────────────────────────────────────────────────────────
+const sysLogBuffer = [];
+const bufferLimit = 100;
+function logToBuffer(level, ...args) {
+  const line = `[${level}] ${new Date().toISOString()} - ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`;
+  sysLogBuffer.push(line);
+  if (sysLogBuffer.length > bufferLimit) sysLogBuffer.shift();
+}
+const originalError = console.error;
+console.error = function(...args) { logToBuffer('ERROR', ...args); originalError.apply(console, args); };
+const originalWarn = console.warn;
+console.warn = function(...args) { logToBuffer('WARN', ...args); originalWarn.apply(console, args); };
+// Also capture info so the AI has context on traffic
+const originalLog = console.log;
+console.log = function(...args) { logToBuffer('INFO', ...args); originalLog.apply(console, args); };
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Google Gemini AI Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 let ai = null;
@@ -181,6 +200,7 @@ app.post('/inject/payment-failure', (req, res) => {
   if (injection.paymentFailure) {
     // Spike the counter immediately so Prometheus sees it right away
     for (let i = 0; i < 20; i++) paymentFailed.inc();
+    console.error("Error: ETIMEOUT at PaymentGateway.charge (/app/services/payment.js:42) - Connection refused by upstream origin");
   }
 
   res.json({
@@ -208,6 +228,9 @@ app.post('/inject/latency', (req, res) => {
       ? `Adding ${delay_ms}ms artificial latency to all simulated requests.`
       : 'Latency injection disabled.',
   });
+  if (injection.latency.enabled) {
+      console.warn(`MongoTimeoutError: Server selection timed out after ${delay_ms} ms at cluster (/app/db/mongodb.js)`);
+  }
 });
 
 // POST /inject/slow-reviews   body: { "enabled": true|false }
@@ -222,6 +245,7 @@ app.post('/inject/slow-reviews', (req, res) => {
       paymentFailed.inc();
       httpRequests.labels('/payment', '502').inc();
     }
+    console.warn("WARN: Proxy to review-service returned 502 Bad Gateway at downstream resolution");
   }
 
   res.json({
@@ -240,6 +264,10 @@ app.post('/inject/slow-reviews', (req, res) => {
 app.post('/inject/sub-traffic', (req, res) => {
   const { enabled } = req.body;
   injection.subTraffic = Boolean(enabled);
+
+  if (injection.subTraffic) {
+     console.error("error: WAF rate limiting active, dropping incoming HTTP socket connections from unknown origin IPs targeting /checkout");
+  }
 
   res.json({
     status: 'ok',
@@ -267,6 +295,9 @@ app.post('/inject/memory-leak', (req, res) => {
           arr[i] = Math.random();
         }
         leakedData.push(arr);
+        if (Math.random() < 0.2) {
+          console.error("FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory \n 1: 0x1012f2c95 node::Abort() \n 2: 0x1011f0a10 node::FatalError() \n 4: V8::FatalProcessOutOfMemory() \n 5: Array.push (<anonymous>) (/app/index.js:255)");
+        }
       }, 1000);
     }
   } else {
@@ -361,8 +392,6 @@ async function detectAnomalies() {
       status:          paymentErrorPct > 20 ? 'FIRING' : 'normal',
       change_pct:      Math.round(paymentErrorPct * 10) / 10,
       business_impact: 'Revenue loss — payment success rate dropped, direct GMV impact',
-      likely_cause:    'payment-failure injection active or upstream payment gateway timeout',
-      recommended_fix: 'Check payment gateway API status page. If gateway is down, engage backup payment provider or reroute traffic.',
       severity:        paymentErrorPct > 50 ? 'critical' : paymentErrorPct > 20 ? 'warning' : 'info',
     },
     {
@@ -370,8 +399,6 @@ async function detectAnomalies() {
       status:          orderDropPct > 50 ? 'FIRING' : 'normal',
       change_pct:      Math.round(-orderDropPct * 10) / 10,
       business_impact: 'GMV decline — order volume significantly below 5-minute average',
-      likely_cause:    'payment failures blocking order completion or traffic drop event',
-      recommended_fix: 'Investigate payment health and recent code deployments. Rollback last deployment if order creation logic is failing.',
       severity:        orderDropPct > 50 ? 'critical' : orderDropPct > 20 ? 'warning' : 'info',
     },
     {
@@ -379,8 +406,6 @@ async function detectAnomalies() {
       status:          trafficMultiplier > 2 ? 'FIRING' : 'normal',
       change_pct:      Math.round((trafficMultiplier - 1) * 100),
       business_impact: 'Infrastructure overload risk — abnormal traffic surge detected',
-      likely_cause:    'sub-traffic injection active, bot flood, or viral external event',
-      recommended_fix: 'Scale up application instances to handle load. Enable CDN caching or WAF rate-limiting if traffic is identified as malicious.',
       severity:        trafficMultiplier > 5 ? 'critical' : trafficMultiplier > 2 ? 'warning' : 'info',
     },
     {
@@ -388,8 +413,6 @@ async function detectAnomalies() {
       status:          latencyP95 > 2 ? 'FIRING' : 'normal',
       change_pct:      Math.round(latencyP95 * 1000), // represented as ms for readability
       business_impact: 'User experience degradation — high latency causing checkout abandonment',
-      likely_cause:    'latency injection active or downstream service/DB degradation',
-      recommended_fix: 'Check database slow query logs and memory usage. Restart containers if memory thrashing is stalling the event loop.',
       severity:        latencyP95 > 2 ? 'critical' : latencyP95 > 1 ? 'warning' : 'info',
     },
     {
@@ -397,8 +420,6 @@ async function detectAnomalies() {
       status:          checkoutConversion < 0.3 ? 'FIRING' : 'normal',
       change_pct:      Math.round(checkoutConversion * 100),
       business_impact: 'Conversion funnel collapse — users abandoning after checkout start',
-      likely_cause:    'payment failures or high latency at payment step causing drop-off',
-      recommended_fix: 'Check UI for frontend errors at the checkout step. Correlate with Latency and Payment metrics to isolate the exact bottleneck.',
       severity:        checkoutConversion < 0.3 ? 'critical' : checkoutConversion < 0.6 ? 'warning' : 'info',
     },
     {
@@ -406,8 +427,6 @@ async function detectAnomalies() {
       status:          memoryUsed > 100 * 1024 * 1024 ? 'FIRING' : 'normal',
       change_pct:      Math.round(memoryUsed / (1024 * 1024)), // Return megabytes used
       business_impact: 'System instability — High memory usage leading to latency (Garbage Collection thrashing) and OOM crash risk',
-      likely_cause:    'memory-leak injection active, or unoptimized data process loop absorbing array memory',
-      recommended_fix: '1. Disable memory-leak injection API if active. 2. Restart application container to clear heap. 3. Look for unpaginated queries or large buffer allocations in recent code.',
       severity:        memoryUsed > 150 * 1024 * 1024 ? 'critical' : memoryUsed > 100 * 1024 * 1024 ? 'warning' : 'info',
     }
   ];
@@ -424,9 +443,14 @@ async function detectAnomalies() {
 The following anomalies have just triggered synchronously:
 ${JSON.stringify(firingAnomalies, null, 2)}
 
+Below is a snapshot of the raw stdout/stderr logs from the application leading up to the failure:
+<raw_logs>
+${sysLogBuffer.join("\n")}
+</raw_logs>
+
 Provide a concise, highly technical Root Cause Analysis (max 2 paragraphs).
-1. Explain the correlation — what is the true root cause vs the cascading symptoms?
-2. Provide a direct, actionable remediation step for the on-call engineer.`;
+1. Read the logs and correlate them explicitly with the numerical anomalies to declare the exact Root Cause of the incident.
+2. Provide a direct, actionable remediation step for the on-call engineer based directly on what you found in the stack trace logs.`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -483,7 +507,6 @@ function printReport(report) {
     console.log(`\n  ${icon}  [${a.severity.toUpperCase()}]  ${a.metric}${flag}`);
     console.log(`       Status         : ${a.status}`);
     console.log(`       Change         : ${a.change_pct}%`);
-    console.log(`       Likely Cause   : ${a.likely_cause}`);
   }
 
   console.log('\n' + line);
