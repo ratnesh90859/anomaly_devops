@@ -1,0 +1,115 @@
+groups:
+  - name: business_anomalies
+    interval: 15s
+    rules:
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. High Payment Failure Rate
+      #    Fires when >20% of payment attempts fail over a 2-minute window
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: HighPaymentFailureRate
+        expr: |
+          (
+            rate(payment_failed_total[2m])
+            /
+            (rate(payment_failed_total[2m]) + rate(payment_success_total[2m]) + 0.001)
+          ) > 0.20
+        for: 2m
+        labels:
+          severity: critical
+          business_impact: revenue
+          team: payments
+        annotations:
+          summary: "💳 High payment failure rate — {{ $value | humanizePercentage }}"
+          description: >
+            Payment failure rate has exceeded 20% for the last 2 minutes.
+            Current failure rate: {{ $value | humanizePercentage }}.
+          likely_cause: "payment-failure injection active, payment gateway timeout, or upstream service degradation"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 2. Orders Drop
+      #    Fires when order rate drops below 50% of the 5-minute average
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: OrdersDrop
+        expr: |
+          rate(orders_created_total[1m])
+          <
+          (rate(orders_created_total[5m]) * 0.5)
+        for: 5m
+        labels:
+          severity: critical
+          business_impact: gmv
+          team: commerce
+        annotations:
+          summary: "📦 Order rate dropped below 50% of 5-minute average"
+          description: >
+            Current orders/s: {{ $value }}.
+            This is less than half the 5-minute rolling average, indicating
+            a significant drop in order creation.
+          likely_cause: "payment failures blocking order completion, or sudden traffic loss"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 3. Traffic Spike
+      #    Fires when 1-minute request rate exceeds 2x the 5-minute average
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: TrafficSpike
+        expr: |
+          rate(http_requests_total[1m])
+          >
+          (rate(http_requests_total[5m]) * 2)
+        for: 0s
+        labels:
+          severity: warning
+          business_impact: infrastructure
+          team: platform
+        annotations:
+          summary: "🌊 Abnormal traffic spike — {{ $value | humanize }} req/s"
+          description: >
+            Current 1-minute request rate is more than 2x the 5-minute baseline.
+            Current rate: {{ $value }} req/s.
+          likely_cause: "sub-traffic injection active, bot traffic, or viral event"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 4. High P95 Latency
+      #    Fires when 95th percentile latency exceeds 2 seconds
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            rate(request_duration_seconds_bucket[5m])
+          ) > 2
+        for: 2m
+        labels:
+          severity: critical
+          business_impact: user_experience
+          team: platform
+        annotations:
+          summary: "🐢 P95 latency exceeds 2s — currently {{ $value | humanizeDuration }}"
+          description: >
+            The 95th percentile response time has been above 2 seconds for 2 minutes.
+            High latency causes user frustration and checkout abandonment.
+          likely_cause: "latency injection active, slow downstream dependency, or CPU/memory pressure"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 5. Checkout-to-Order Funnel Drop
+      #    Fires when fewer than 30% of checkouts result in completed orders
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: CheckoutAbandonDrop
+        expr: |
+          (
+            rate(orders_created_total[2m])
+            /
+            (rate(checkout_started_total[2m]) + 0.001)
+          ) < 0.3
+        for: 0s
+        labels:
+          severity: critical
+          business_impact: conversion
+          team: commerce
+        annotations:
+          summary: "🛒 Checkout conversion collapsed — {{ $value | humanizePercentage }} completing"
+          description: >
+            Less than 30% of initiated checkouts are resulting in completed orders.
+            Conversion rate: {{ $value | humanizePercentage }}.
+          likely_cause: "payment failures or high latency causing drop-off in checkout funnel"
