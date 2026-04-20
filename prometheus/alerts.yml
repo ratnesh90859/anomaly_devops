@@ -113,3 +113,22 @@ groups:
             Less than 30% of initiated checkouts are resulting in completed orders.
             Conversion rate: {{ $value | humanizePercentage }}.
           likely_cause: "payment failures or high latency causing drop-off in checkout funnel"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 6. Memory Exhaustion
+      #    Fires when Node.js heap usage exceeds 100MB
+      # ─────────────────────────────────────────────────────────────────────
+      - alert: MemoryExhaustion
+        expr: nodejs_heap_size_used_bytes > 104857600
+        for: 1m
+        labels:
+          severity: critical
+          business_impact: infrastructure
+          team: platform
+        annotations:
+          summary: "💥 App Memory Exhaustion — currently {{ $value | humanize1024 }} bytes"
+          description: >
+            Node.js heap usage has exceeded 100MB for 1 minute.
+            This indicates an unoptimized process or a memory leak that will soon cause 
+            Garbage Collection to throttle the event loop, causing P95 latency spikes and eventual OOM crash.
+          likely_cause: "memory-leak injection active or runaway array allocation"

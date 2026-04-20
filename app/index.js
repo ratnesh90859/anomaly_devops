@@ -63,7 +63,18 @@ const injection = {
   },
   slowReviews: false,      // payment returns 502 status
   subTraffic: false,       // enables high-volume internal traffic loop
+  memoryLeak: {
+    enabled: false,
+    mb_per_second: 0,
+  },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Real Memory Leak Simulator
+// ─────────────────────────────────────────────────────────────────────────────
+let memoryLeakInterval = null;
+const leakedData = [];
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Background Traffic Simulator
@@ -132,12 +143,14 @@ app.get('/', (req, res) => {
       inject_latency:        'POST /inject/latency          body: { "enabled": true|false, "delay_ms": 3000 }',
       inject_slow_reviews:   'POST /inject/slow-reviews     body: { "enabled": true|false }',
       inject_sub_traffic:    'POST /inject/sub-traffic      body: { "enabled": true|false }',
+      inject_memory_leak:    'POST /inject/memory-leak      body: { "enabled": true|false, "mb_per_second": 10 }',
     },
     dashboards: {
       prometheus: 'http://<VM_IP>:9090',
       grafana:    'http://<VM_IP>:4000  (admin / admin)',
     },
     active_injections: injection,
+    memory_leaked_mb: Math.floor(leakedData.length * (injection.memoryLeak.mb_per_second || 0)),
   });
 });
 
@@ -229,6 +242,40 @@ app.post('/inject/sub-traffic', (req, res) => {
   });
 });
 
+// POST /inject/memory-leak   body: { "enabled": true|false, "mb_per_second": 10 }
+// Simulates a real memory leak by continuously allocating arrays of strings.
+app.post('/inject/memory-leak', (req, res) => {
+  const { enabled, mb_per_second = 10 } = req.body;
+  injection.memoryLeak = { enabled: Boolean(enabled), mb_per_second: Number(mb_per_second) };
+
+  if (injection.memoryLeak.enabled) {
+    if (!memoryLeakInterval) {
+      memoryLeakInterval = setInterval(() => {
+        // Allocate ~MBs of data
+        const mb = injection.memoryLeak.mb_per_second;
+        // String 'A' repeated creates a large string taking up heap memory
+        leakedData.push('A'.repeat(mb * 1024 * 1024));
+      }, 1000);
+    }
+  } else {
+    if (memoryLeakInterval) {
+      clearInterval(memoryLeakInterval);
+      memoryLeakInterval = null;
+    }
+    leakedData.length = 0; // Clear the memory
+  }
+
+  res.json({
+    status: 'ok',
+    injection: 'memory-leak',
+    enabled: injection.memoryLeak.enabled,
+    mb_per_second: injection.memoryLeak.mb_per_second,
+    message: injection.memoryLeak.enabled
+      ? `Memory leak started: allocating ${mb_per_second} MB per second.`
+      : 'Memory leak disabled and memory freed.'
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Business Correlation API — GET /anomalies
 // Queries Prometheus HTTP API, evaluates business heuristics, returns JSON.
@@ -263,6 +310,7 @@ async function detectAnomalies() {
     latencyP95,
     checkoutRate2m,
     orderRate2m,
+    memoryUsed,
   ] = await Promise.all([
     queryPrometheus('rate(payment_failed_total[2m])'),
     queryPrometheus('rate(payment_success_total[2m])'),
@@ -273,6 +321,7 @@ async function detectAnomalies() {
     queryPrometheus('histogram_quantile(0.95, rate(request_duration_seconds_bucket[5m]))'),
     queryPrometheus('rate(checkout_started_total[2m])'),
     queryPrometheus('rate(orders_created_total[2m])'),
+    queryPrometheus('nodejs_heap_size_used_bytes'),
   ]);
 
   // Derived metrics
@@ -335,6 +384,14 @@ async function detectAnomalies() {
       likely_cause:    'payment failures or high latency at payment step causing drop-off',
       severity:        checkoutConversion < 0.3 ? 'critical' : checkoutConversion < 0.6 ? 'warning' : 'info',
     },
+    {
+      metric:          'nodejs_heap_size_used_bytes',
+      status:          memoryUsed > 100 * 1024 * 1024 ? 'FIRING' : 'normal',
+      change_pct:      Math.round(memoryUsed / (1024 * 1024)), // Return megabytes used
+      business_impact: 'System instability — High memory usage leading to latency (Garbage Collection thrashing) and OOM crash risk',
+      likely_cause:    'memory-leak injection active, or unoptimized data process loop absorbing array memory',
+      severity:        memoryUsed > 150 * 1024 * 1024 ? 'critical' : memoryUsed > 100 * 1024 * 1024 ? 'warning' : 'info',
+    }
   ];
 }
 
@@ -418,6 +475,7 @@ app.listen(3000, () => {
   console.log('  ║  POST /inject/latency           Enable/disable latency   ║');
   console.log('  ║  POST /inject/slow-reviews      Enable/disable 502s      ║');
   console.log('  ║  POST /inject/sub-traffic       Enable/disable burst     ║');
+  console.log('  ║  POST /inject/memory-leak       Enable/disable real leak ║');
   console.log('  ╚══════════════════════════════════════════════════════════╝');
   console.log('');
 });

@@ -1,0 +1,6 @@
+node_modules/
+*.json.key
+*.pem
+grafana-data/
+prometheus-data/
+.env
