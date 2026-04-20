@@ -6,8 +6,11 @@ services:
     container_name: anomaly-app
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     environment:
       - PROMETHEUS_URL=http://prometheus:9090
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       - prometheus
     networks:

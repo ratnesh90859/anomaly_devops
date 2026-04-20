@@ -3,9 +3,18 @@
 const express = require('express');
 const client  = require('prom-client');
 const axios   = require('axios');
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 app.use(express.json());
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Google Gemini AI Initialization
+// ─────────────────────────────────────────────────────────────────────────────
+let ai = null;
+if (process.env.GEMINI_API_KEY) {
+  ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prometheus Registry & Metrics
@@ -343,13 +352,14 @@ async function detectAnomalies() {
     : 1;
 
   // Build anomaly report with business context
-  return [
+  const baseAnomalies = [
     {
       metric:          'payment_failed_total',
       status:          paymentErrorPct > 20 ? 'FIRING' : 'normal',
       change_pct:      Math.round(paymentErrorPct * 10) / 10,
       business_impact: 'Revenue loss — payment success rate dropped, direct GMV impact',
       likely_cause:    'payment-failure injection active or upstream payment gateway timeout',
+      recommended_fix: 'Check payment gateway API status page. If gateway is down, engage backup payment provider or reroute traffic.',
       severity:        paymentErrorPct > 50 ? 'critical' : paymentErrorPct > 20 ? 'warning' : 'info',
     },
     {
@@ -358,6 +368,7 @@ async function detectAnomalies() {
       change_pct:      Math.round(-orderDropPct * 10) / 10,
       business_impact: 'GMV decline — order volume significantly below 5-minute average',
       likely_cause:    'payment failures blocking order completion or traffic drop event',
+      recommended_fix: 'Investigate payment health and recent code deployments. Rollback last deployment if order creation logic is failing.',
       severity:        orderDropPct > 50 ? 'critical' : orderDropPct > 20 ? 'warning' : 'info',
     },
     {
@@ -366,6 +377,7 @@ async function detectAnomalies() {
       change_pct:      Math.round((trafficMultiplier - 1) * 100),
       business_impact: 'Infrastructure overload risk — abnormal traffic surge detected',
       likely_cause:    'sub-traffic injection active, bot flood, or viral external event',
+      recommended_fix: 'Scale up application instances to handle load. Enable CDN caching or WAF rate-limiting if traffic is identified as malicious.',
       severity:        trafficMultiplier > 5 ? 'critical' : trafficMultiplier > 2 ? 'warning' : 'info',
     },
     {
@@ -374,6 +386,7 @@ async function detectAnomalies() {
       change_pct:      Math.round(latencyP95 * 1000), // represented as ms for readability
       business_impact: 'User experience degradation — high latency causing checkout abandonment',
       likely_cause:    'latency injection active or downstream service/DB degradation',
+      recommended_fix: 'Check database slow query logs and memory usage. Restart containers if memory thrashing is stalling the event loop.',
       severity:        latencyP95 > 2 ? 'critical' : latencyP95 > 1 ? 'warning' : 'info',
     },
     {
@@ -382,6 +395,7 @@ async function detectAnomalies() {
       change_pct:      Math.round(checkoutConversion * 100),
       business_impact: 'Conversion funnel collapse — users abandoning after checkout start',
       likely_cause:    'payment failures or high latency at payment step causing drop-off',
+      recommended_fix: 'Check UI for frontend errors at the checkout step. Correlate with Latency and Payment metrics to isolate the exact bottleneck.',
       severity:        checkoutConversion < 0.3 ? 'critical' : checkoutConversion < 0.6 ? 'warning' : 'info',
     },
     {
@@ -390,9 +404,46 @@ async function detectAnomalies() {
       change_pct:      Math.round(memoryUsed / (1024 * 1024)), // Return megabytes used
       business_impact: 'System instability — High memory usage leading to latency (Garbage Collection thrashing) and OOM crash risk',
       likely_cause:    'memory-leak injection active, or unoptimized data process loop absorbing array memory',
+      recommended_fix: '1. Disable memory-leak injection API if active. 2. Restart application container to clear heap. 3. Look for unpaginated queries or large buffer allocations in recent code.',
       severity:        memoryUsed > 150 * 1024 * 1024 ? 'critical' : memoryUsed > 100 * 1024 * 1024 ? 'warning' : 'info',
     }
   ];
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Dynamic AI Root Cause Analysis
+  // ─────────────────────────────────────────────────────────────────────────────
+  const firingAnomalies = baseAnomalies.filter((a) => a.status === 'FIRING');
+  let aiAnalysis = null;
+
+  if (firingAnomalies.length > 0 && ai) {
+    try {
+      const prompt = `You are a DevOps Site Reliability Engineer monitoring a Node.js e-commerce platform.
+The following anomalies have just triggered synchronously:
+${JSON.stringify(firingAnomalies, null, 2)}
+
+Provide a concise, highly technical Root Cause Analysis (max 2 paragraphs).
+1. Explain the correlation — what is the true root cause vs the cascading symptoms?
+2. Provide a direct, actionable remediation step for the on-call engineer.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt
+      });
+      aiAnalysis = response.text;
+    } catch (err) {
+      console.error('AI Analysis failed:', err.message);
+      aiAnalysis = 'AI analysis failed: ' + err.message;
+    }
+  } else if (firingAnomalies.length > 0) {
+    aiAnalysis = 'GEMINI_API_KEY not configured. Add it to .env to enable AI Root Cause Analysis.';
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    firing_count: firingAnomalies.length,
+    ai_root_cause_analysis: aiAnalysis || 'System healthy. No analysis needed.',
+    anomalies: baseAnomalies
+  };
 }
 
 app.get('/anomalies', async (req, res) => {
@@ -414,29 +465,35 @@ app.get('/inject/status', (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Stdout Anomaly Reporter — prints formatted report every 30 seconds
 // ─────────────────────────────────────────────────────────────────────────────
-function printReport(anomalies) {
+function printReport(report) {
   const SEVERITY_ICON = { critical: '🔴', warning: '🟡', info: '🟢' };
   const line          = '─'.repeat(72);
-  const ts            = new Date().toISOString();
+  const ts            = report.timestamp;
 
   console.log('\n' + line);
   console.log(`  🔍  ANOMALY DETECTION REPORT  ·  ${ts}`);
   console.log(line);
 
-  for (const a of anomalies) {
+  for (const a of report.anomalies) {
     const icon = SEVERITY_ICON[a.severity] || '⚪';
     const flag = a.status === 'FIRING' ? ' ◀ FIRING' : '';
     console.log(`\n  ${icon}  [${a.severity.toUpperCase()}]  ${a.metric}${flag}`);
     console.log(`       Status         : ${a.status}`);
     console.log(`       Change         : ${a.change_pct}%`);
-    console.log(`       Business Impact: ${a.business_impact}`);
     console.log(`       Likely Cause   : ${a.likely_cause}`);
   }
 
-  const firing = anomalies.filter((a) => a.status === 'FIRING').length;
+  console.log('\n' + line);
+  if (report.firing_count > 0) {
+    console.log('  🤖 AI ROOT CAUSE ANALYSIS:');
+    console.log(`\n${report.ai_root_cause_analysis.replace(/^/gm, '    ')}`);
+  } else {
+    console.log('  ✅ System Healthy.');
+  }
+
   console.log('\n' + line);
   console.log(
-    `  Summary: ${firing} FIRING  ·  ${anomalies.length - firing} normal` +
+    `  Summary: ${report.firing_count} FIRING  ·  ${report.anomalies.length - report.firing_count} normal` +
     `  ·  Active injections: ${Object.entries(injection)
       .filter(([, v]) => v === true || (typeof v === 'object' && v.enabled))
       .map(([k]) => k)
@@ -476,6 +533,11 @@ app.listen(3000, () => {
   console.log('  ║  POST /inject/slow-reviews      Enable/disable 502s      ║');
   console.log('  ║  POST /inject/sub-traffic       Enable/disable burst     ║');
   console.log('  ║  POST /inject/memory-leak       Enable/disable real leak ║');
+  if (!ai) {
+    console.log('  ⚠️   GEMINI_API_KEY missing. Dynamic AI Root Cause Analysis is DISABLED.');
+  } else {
+    console.log('  🤖  Google Gemini AI Engine initialized for Root Cause Analysis.');
+  }
   console.log('  ╚══════════════════════════════════════════════════════════╝');
   console.log('');
 });
