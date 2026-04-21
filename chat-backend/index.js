@@ -171,6 +171,32 @@ async function fetchSystemState() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Step 4: Final AI Analysis — combine everything and ask Gemini for RCA
 // ─────────────────────────────────────────────────────────────────────────────
+async function callGeminiWithRetry(prompt, maxRetries = 3) {
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+  for (const model of models) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await ai.models.generateContent({ model, contents: prompt });
+        console.log(`[INFO] Gemini responded using model: ${model}`);
+        return response.text;
+      } catch (e) {
+        const is503 = e.message && (e.message.includes('503') || e.message.includes('UNAVAILABLE') || e.message.includes('high demand'));
+        if (is503 && attempt < maxRetries) {
+          const delay = attempt * 3000;
+          console.warn(`[WARN] Gemini 503 on ${model} (attempt ${attempt}). Retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+        } else if (is503 && attempt === maxRetries) {
+          console.warn(`[WARN] ${model} exhausted retries, trying next model...`);
+          break; // try next model
+        } else {
+          throw e; // non-503 error, don't retry
+        }
+      }
+    }
+  }
+  throw new Error('All Gemini models are temporarily unavailable. Please try again in a minute.');
+}
+
 async function generateRCA(userQuestion, intent, metricData, systemState) {
   if (!ai) {
     return '⚠️ Gemini AI is not configured. Please check the GEMINI_API_KEY environment variable.';
@@ -191,7 +217,7 @@ You have retrieved the following real-time data from a production Node.js e-comm
 ${intent.summary} (from ${new Date(intent.start * 1000).toISOString()} to ${new Date(intent.end * 1000).toISOString()})
 
 ## Prometheus Metric Data
-${metricSummaryText}
+${metricSummaryText || 'No significant metric changes detected in this time window.'}
 
 ## Current Live System State (from anomaly engine)
 ${JSON.stringify(systemState, null, 2)}
@@ -208,12 +234,12 @@ Format your response in clean markdown with headers, bullet points, and bold tex
 `;
 
   try {
-    const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
-    return response.text;
+    return await callGeminiWithRetry(prompt);
   } catch (e) {
     return `❌ AI analysis failed: ${e.message}`;
   }
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /chat — Main endpoint
