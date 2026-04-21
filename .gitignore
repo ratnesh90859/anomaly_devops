@@ -4,3 +4,5 @@ node_modules/
 grafana-data/
 prometheus-data/
 .env
+dist/
+test-ai.js

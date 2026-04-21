@@ -54,6 +54,35 @@ services:
       - monitoring
     restart: unless-stopped
 
+  chat-backend:
+    build: ./chat-backend
+    container_name: chat-backend
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANOMALY_APP_URL=http://app:3000
+    depends_on:
+      - prometheus
+      - app
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  chat-ui:
+    build: ./chat-ui
+    container_name: chat-ui
+    ports:
+      - "5000:80"
+    depends_on:
+      - chat-backend
+    networks:
+      - monitoring
+    restart: unless-stopped
+
 networks:
   monitoring:
     driver: bridge
@@ -61,3 +90,4 @@ networks:
 volumes:
   prometheus-data:
   grafana-data:
+
