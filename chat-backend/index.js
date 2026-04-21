@@ -28,8 +28,8 @@ if (GEMINI_API_KEY) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemini Helper — retry on transient 503 errors
 // ─────────────────────────────────────────────────────────────────────────────
-async function callGemini(prompt, maxRetries = 4) {
-  const model = 'gemini-2.5-flash';
+async function callGemini(prompt, maxRetries = 2) {
+  const model = 'gemini-2.5-flash-lite';
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const res = await ai.models.generateContent({ model, contents: prompt });
@@ -40,7 +40,7 @@ async function callGemini(prompt, maxRetries = 4) {
         e.message.includes('high demand') || e.message.includes('temporarily')
       );
       if (isTransient && attempt < maxRetries) {
-        const delay = attempt * 5000;
+        const delay = 3000;
         console.warn(`[WARN] Gemini 503, attempt ${attempt}/${maxRetries}. Retrying in ${delay / 1000}s...`);
         await new Promise(r => setTimeout(r, delay));
       } else throw e;
