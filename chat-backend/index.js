@@ -172,7 +172,7 @@ async function fetchSystemState() {
 // Step 4: Final AI Analysis — combine everything and ask Gemini for RCA
 // ─────────────────────────────────────────────────────────────────────────────
 async function callGeminiWithRetry(prompt, maxRetries = 3) {
-  const models = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash-lite'];
   for (const model of models) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
