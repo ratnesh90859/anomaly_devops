@@ -73,20 +73,40 @@ function AIMessage({ data, time }) {
       <div className="avatar">🤖</div>
       <div style={{ display: 'flex', flexDirection: 'column', maxWidth: '80%' }}>
         <div className="bubble">
-          {data.intent && (
-            <div className="intent-badge">
-              🎯 {data.intent}
-            </div>
+          {data.intent_summary && (
+            <div className="intent-badge">🎯 {data.intent_summary}</div>
           )}
-          {data.time_range && (
+          {data.time_range?.description && (
             <div className="time-range-pill">
-              <span className="pill">FROM {new Date(data.time_range.from).toLocaleTimeString('en-IN')}</span>
-              <span className="pill">TO {new Date(data.time_range.to).toLocaleTimeString('en-IN')}</span>
+              <span className="pill">🕐 {data.time_range.description}</span>
+              {data.queries_generated > 0 && <span className="pill">📊 {data.queries_generated} PromQL queries</span>}
+              {data.metrics_analyzed  > 0 && <span className="pill">✅ {data.metrics_analyzed} metrics analyzed</span>}
+              {data.spikes_found?.length > 0 && (
+                <span className="pill" style={{ background: 'rgba(239,68,68,0.15)', borderColor: 'rgba(239,68,68,0.3)', color: '#f87171' }}>
+                  ⚠️ Spikes: {data.spikes_found.join(', ')}
+                </span>
+              )}
+              {data.total_ms && <span className="pill">⚡ {(data.total_ms / 1000).toFixed(1)}s</span>}
             </div>
           )}
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {data.answer}
           </ReactMarkdown>
+          {data.workflow_log?.length > 0 && (
+            <details style={{ marginTop: '0.75rem' }}>
+              <summary style={{ fontSize: '0.68rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                🔬 Workflow trace ({data.workflow_log.length} nodes)
+              </summary>
+              <div style={{ marginTop: '0.4rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                {data.workflow_log.map((step, i) => (
+                  <div key={i} style={{ fontSize: '0.65rem', color: step.status === 'ok' ? 'var(--accent-green)' : 'var(--accent-red)', fontFamily: 'JetBrains Mono, monospace' }}>
+                    {step.status === 'ok' ? '✓' : '✗'} {step.node} ({step.ms}ms)
+                    {step.error && <span style={{ color: 'var(--accent-red)' }}> — {step.error}</span>}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
         <div className="timestamp">{formatTime(time)}</div>
       </div>
