@@ -12,20 +12,55 @@ app.use(express.json());
 // System Log Interceptor
 // Captures the last 100 log/error lines to pass as raw context to Gemini AI
 // ─────────────────────────────────────────────────────────────────────────────
-const sysLogBuffer = [];
-const bufferLimit = 100;
+const fs = require('fs');
+const LOG_FILE = './system.log';
+
 function logToBuffer(level, ...args) {
   const line = `[${level}] ${new Date().toISOString()} - ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`;
-  sysLogBuffer.push(line);
-  if (sysLogBuffer.length > bufferLimit) sysLogBuffer.shift();
+  fs.appendFile(LOG_FILE, line + '\n', () => {}); // Fast async file write
 }
+
 const originalError = console.error;
 console.error = function(...args) { logToBuffer('ERROR', ...args); originalError.apply(console, args); };
 const originalWarn = console.warn;
 console.warn = function(...args) { logToBuffer('WARN', ...args); originalWarn.apply(console, args); };
-// Also capture info so the AI has context on traffic
 const originalLog = console.log;
 console.log = function(...args) { logToBuffer('INFO', ...args); originalLog.apply(console, args); };
+
+// 1-Hour Log Retention (Runs every 10 minutes)
+setInterval(() => {
+  if (fs.existsSync(LOG_FILE)) {
+    const lines = fs.readFileSync(LOG_FILE, 'utf-8').split('\n');
+    const oneHourAgo = Date.now() - (60 * 60 * 1000);
+    
+    // Keep only lines from the last 1 hour
+    const recentLines = lines.filter(line => {
+      if (!line.trim()) return false;
+      const match = line.match(/^\[.*?\] (.*?) -/);
+      return match && match[1] ? (new Date(match[1]).getTime() > oneHourAgo) : false;
+    });
+    
+    fs.writeFileSync(LOG_FILE, recentLines.join('\n') + (recentLines.length ? '\n' : ''));
+  }
+}, 10 * 60 * 1000);
+
+// Helper to query logs by time range
+function getHistoricalLogs(startUnix, endUnix) {
+  if (!fs.existsSync(LOG_FILE)) return [];
+  const lines = fs.readFileSync(LOG_FILE, 'utf-8').split('\n');
+  const valid = lines.filter(line => {
+    if (!line.trim()) return false;
+    const match = line.match(/^\[.*?\] (.*?) -/);
+    if (match && match[1]) {
+      const ts = Math.floor(new Date(match[1]).getTime() / 1000);
+      if (startUnix && ts < startUnix) return false;
+      if (endUnix && ts > endUnix) return false;
+      return true;
+    }
+    return false;
+  });
+  return valid.slice(-200); // Return up to 200 matching lines
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Google Gemini AI Initialization
@@ -341,7 +376,7 @@ async function queryPrometheus(promql) {
   }
 }
 
-async function detectAnomalies() {
+async function detectAnomalies(startUnix, endUnix) {
   // Run all Prometheus queries in parallel for speed
   const [
     failRate2m,
@@ -445,7 +480,7 @@ ${JSON.stringify(firingAnomalies, null, 2)}
 
 Below is a snapshot of the raw stdout/stderr logs from the application leading up to the failure:
 <raw_logs>
-${sysLogBuffer.join("\n")}
+${getHistoricalLogs(Math.floor(Date.now()/1000)-300, Math.floor(Date.now()/1000)).join("\n")}
 </raw_logs>
 
 Provide a concise, highly technical Root Cause Analysis (max 2 paragraphs).
@@ -475,7 +510,9 @@ Provide a concise, highly technical Root Cause Analysis (max 2 paragraphs).
 
 app.get('/anomalies', async (req, res) => {
   try {
-    const anomalies = await detectAnomalies();
+    const startUnix = req.query.start ? parseInt(req.query.start) : Math.floor(Date.now()/1000) - 3600;
+    const endUnix   = req.query.end   ? parseInt(req.query.end)   : Math.floor(Date.now()/1000);
+    const anomalies = await detectAnomalies(startUnix, endUnix);
     res.json(anomalies);
   } catch (err) {
     res.status(500).json({ error: 'Failed to query Prometheus', detail: err.message });

@@ -281,8 +281,13 @@ async function nodeLogCorrelator(state) {
   console.log('[NODE 4] Log Correlator');
 
   let systemState = {};
+  const { start, end } = state.intent?.timeRange || {};
   try {
-    const res  = await fetch(`${ANOMALY_APP_URL}/anomalies`);
+    const url = start && end 
+      ? \`\${ANOMALY_APP_URL}/anomalies?start=\${start}&end=\${end}\`
+      : \`\${ANOMALY_APP_URL}/anomalies\`;
+      
+    const res  = await fetch(url);
     const data = await res.json();
     systemState = {
       firing_count:     data.firing_count,
